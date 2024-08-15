@@ -14,64 +14,74 @@ import (
 	"github.com/docker/docker/client"
 )
 
-type Images []struct {
-	Digest string `json:"digest"`
+type MultiplePlatformImageInfo struct {
+	Digest       string `json:"digest"`
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
 }
 
-type ImageDetail struct {
-	Digest string `json:"digest"`
-	Images Images `json:"images"`
+type ImageInfo struct {
+	Digest                        string                      `json:"digest"`
+	MultiplePlatformImageInfoList []MultiplePlatformImageInfo `json:"images"`
 }
 
 type Container struct {
 	types.Container
-	ImageDigest string
+	ImageInspect types.ImageInspect
 }
 
-func GetRemoteDockerTag(image, tag string) (Images, error) {
+// Use registry APIs to fetch image info
+func GetRemoteDockerInfo(image, tag string) (ImageInfo, error) {
+	// [registry-hostname]/[namespace]/[image-name]:[tag]
 	var url string
 	// check number of "/" in image
 	imagePart := strings.Split(image, "/")
 	imagePartLen := len(imagePart)
-	switch len(imagePart) {
-	case 1:
-		image = "library/" + image
-		url = "https://registry.hub.docker.com/v2/repositories/" + image + "/tags/" + tag
-	case 2:
-		url = "https://registry.hub.docker.com/v2/repositories/" + image + "/tags/" + tag
-	default: // e.g. m.daocloud.io/ghcr.io/esphome/esphome
-		if imagePart[imagePartLen-3] == "ghcr.io" {
-			url = "https://ghcr.io/v2/" + image + "/manifests/" + tag
-		} else {
-			return nil, fmt.Errorf("not support image %s", image)
-		}
+	var registry string = "docker.io"
+	var namespace string = "library"
+	var name string = imagePart[imagePartLen-1]
+
+	if imagePartLen >= 2 {
+		namespace = imagePart[imagePartLen-2]
 	}
+	if imagePartLen >= 3 { // e.g. m.daocloud.io/ghcr.io/esphome/esphome
+		registry = imagePart[imagePartLen-3]
+	}
+
+	if registry == "ghcr.io" {
+		url = fmt.Sprintf("https://ghcr.io/v2/%s/%s/manifests/%s", namespace, name, tag)
+	} else if registry == "docker.io" {
+		url = fmt.Sprintf("https://registry.hub.docker.com/v2/repositories/%s/%s/tags/%s", namespace, name, tag)
+	} else {
+		return ImageInfo{}, fmt.Errorf("not support image %s", image)
+	}
+	log.Println(url)
 
 	// via docker hub
 	resp, err := http.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("error while getting %s: %s", url, err)
+		return ImageInfo{}, fmt.Errorf("error while getting %s: %s", url, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error while reading body: %s", err)
+		return ImageInfo{}, fmt.Errorf("error while reading body: %s", err)
 	}
 
-	var dockerTag ImageDetail
-	err = json.Unmarshal(body, &dockerTag)
+	var info ImageInfo
+	err = json.Unmarshal(body, &info)
 	if err != nil {
-		return nil, fmt.Errorf("server error while unmarshalling body: %s", err)
+		return ImageInfo{}, fmt.Errorf("server error while unmarshalling body: %s", err)
 	}
 
-	if dockerTag.Images == nil {
-		return nil, fmt.Errorf("error %s", string(body))
-	} else if len(dockerTag.Images) == 0 {
-		return nil, fmt.Errorf("images is empty for %s:%s", image, tag)
+	if info.MultiplePlatformImageInfoList == nil {
+		return ImageInfo{}, fmt.Errorf("error %s", string(body))
+	} else if len(info.MultiplePlatformImageInfoList) == 0 {
+		return ImageInfo{}, fmt.Errorf("images is empty for %s:%s", image, tag)
 	}
 
-	return dockerTag.Images, nil
+	return info, nil
 }
 
 func GetDockerPortainerList() ([]Container, error) {
@@ -88,21 +98,21 @@ func GetDockerPortainerList() ([]Container, error) {
 		return nil, fmt.Errorf("error while listing containers: %s", err)
 	}
 
-	containerWithDigests := make([]Container, 0, len(containers))
+	containerWithImageInfos := make([]Container, 0, len(containers))
 	for _, c := range containers {
 		img, _, err := cli.ImageInspectWithRaw(ctx, c.Image)
 		if err != nil {
 			return nil, fmt.Errorf("error while inspecting image %s of container %s: %s", c.Image, c.ID, err)
 		}
 
-		containerWithDigest := Container{
-			Container:   c,
-			ImageDigest: strings.Split(img.RepoDigests[0], "@")[1],
+		containerWithImageInfo := Container{
+			Container:    c,
+			ImageInspect: img,
 		}
 
-		containerWithDigests = append(containerWithDigests, containerWithDigest)
+		containerWithImageInfos = append(containerWithImageInfos, containerWithImageInfo)
 	}
-	return containerWithDigests, nil
+	return containerWithImageInfos, nil
 
 }
 
@@ -114,30 +124,35 @@ func main() {
 	for _, container := range containers {
 		name := container.Names[0]
 		imageName := container.Image
-		imageDigest := container.ImageDigest
+		imageDigest := strings.Split(container.ImageInspect.RepoDigests[0], "@")[1] // startwith "sha256:"
+		var imageTag string = "latest"
 		if strings.Contains(imageName, ":") {
+			imageTag = strings.Split(imageName, ":")[1]
 			imageName = strings.Split(imageName, ":")[0]
 		}
 		log.Println("Handling container:", name, imageName)
-		images, err := GetRemoteDockerTag(imageName, "latest")
+		latest, err := GetRemoteDockerInfo(imageName, "latest")
 		if err != nil {
 			log.Println("Unable to get remote docker tag:", err)
 			continue
 		}
 
-		// search imageId in images
-		found := false
-		for _, image := range images {
-			if image.Digest == imageDigest {
-				log.Println("Image is up to date:", name, imageName)
-				found = true
-			} else {
-				log.Println(image.Digest, "!=", imageDigest)
-			}
+		if imageDigest == latest.Digest {
+			log.Println("Image is up to date:", name, imageName)
+			continue
+		} else if imageTag == "latest" {
+			log.Println("Image is not up to date:", name, imageName)
+			continue
 		}
-		if !found {
-			log.Println("Image is outdated:", name, imageName)
+
+		current, err := GetRemoteDockerInfo(imageName, imageTag)
+		// 比较两个MultiplePlatformImageInfoList是否
+
+		if err != nil {
+			log.Println("Unable to get remote docker tag:", err)
 		}
+		log.Println(current, latest)
+		// todo
 	}
 
 }
