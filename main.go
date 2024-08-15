@@ -55,7 +55,6 @@ func GetRemoteDockerInfo(image, tag string) (ImageInfo, error) {
 	} else {
 		return ImageInfo{}, fmt.Errorf("not support image %s", image)
 	}
-	log.Println(url)
 
 	// via docker hub
 	resp, err := http.Get(url)
@@ -130,29 +129,55 @@ func main() {
 			imageTag = strings.Split(imageName, ":")[1]
 			imageName = strings.Split(imageName, ":")[0]
 		}
-		log.Println("Handling container:", name, imageName)
 		latest, err := GetRemoteDockerInfo(imageName, "latest")
 		if err != nil {
-			log.Println("Unable to get remote docker tag:", err)
+			log.Println("Unable to get remote docker tag:", name, imageName, err)
 			continue
 		}
 
 		if imageDigest == latest.Digest {
-			log.Println("Image is up to date:", name, imageName)
+			log.Println(name, imageName, "✅")
 			continue
 		} else if imageTag == "latest" {
-			log.Println("Image is not up to date:", name, imageName)
+			log.Println(name, imageName, "❌")
 			continue
 		}
 
 		current, err := GetRemoteDockerInfo(imageName, imageTag)
-		// 比较两个MultiplePlatformImageInfoList是否
 
 		if err != nil {
 			log.Println("Unable to get remote docker tag:", err)
 		}
-		log.Println(current, latest)
-		// todo
+
+		var currentDigest string
+		var latestDigest string
+
+		for _, img := range current.MultiplePlatformImageInfoList {
+			if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
+				currentDigest = img.Digest
+			}
+		}
+		if currentDigest == "" {
+			log.Println("Unable to find current digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
+			continue
+		}
+
+		for _, img := range latest.MultiplePlatformImageInfoList {
+			if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
+				latestDigest = img.Digest
+			}
+		}
+		if latestDigest == "" {
+			log.Println("Unable to find latest digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
+			continue
+		}
+
+		if currentDigest != latestDigest {
+			log.Println(name, imageName, "❌")
+		} else {
+			log.Println(name, imageName, "✅")
+		}
+
 	}
 
 }
