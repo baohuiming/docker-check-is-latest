@@ -1,3 +1,4 @@
+// Check if each container in the local machine's container list has an image that matches the latest version from the remote repository.
 package main
 
 import (
@@ -7,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -30,10 +32,20 @@ type Container struct {
 	ImageInspect types.ImageInspect
 }
 
+type CacheMap map[string]ImageInfo
+
+var ghcr_token *string
+var cache CacheMap
+
 // Use registry APIs to fetch image info
 func GetRemoteDockerInfo(image, tag string) (ImageInfo, error) {
 	// [registry-hostname]/[namespace]/[image-name]:[tag]
 	var url string
+	var info ImageInfo
+	if v, ok := cache[image+":"+tag]; ok {
+		return v, nil
+	}
+
 	// check number of "/" in image
 	imagePart := strings.Split(image, "/")
 	imagePartLen := len(imagePart)
@@ -48,41 +60,67 @@ func GetRemoteDockerInfo(image, tag string) (ImageInfo, error) {
 		registry = imagePart[imagePartLen-3]
 	}
 
-	if registry == "ghcr.io" {
-		url = fmt.Sprintf("https://ghcr.io/v2/%s/%s/manifests/%s", namespace, name, tag)
-	} else if registry == "docker.io" {
+	headers := make(http.Header)
+
+	switch registry {
+	// https://github.com/rancher/image-mirror/blob/2528359b6681c2bbaaa1a2cd1c2db9005e8cbff1/retrieve-image-tags/retrieve-image-tags.py#L36
+	case "docker.io":
 		url = fmt.Sprintf("https://registry.hub.docker.com/v2/repositories/%s/%s/tags/%s", namespace, name, tag)
-	} else {
-		return ImageInfo{}, fmt.Errorf("not support image %s", image)
+	case "ghcr.io":
+		if ghcr_token == nil {
+			return info, fmt.Errorf("missing ghcr_token")
+		}
+		url = fmt.Sprintf("https://api.github.com/orgs/%s/packages/container/%s/versions", namespace, name)
+		headers.Set("Accept", "application/vnd.github+json")
+		headers.Set("Authorization", "Bearer "+*ghcr_token)
+		headers.Set("X-GitHub-Api-Version", "2022-11-28")
+	case "gcr.io":
+		// url = "https://gcr.io/v2/{namespace}/{package}/tags/list"
+		fallthrough
+	case "quay.io":
+		// url = "https://quay.io/api/v1/repository/{namespace}/{package}/tag/"
+		fallthrough
+	default:
+		return info, fmt.Errorf("not support image %s", image)
 	}
 
-	// via docker hub
-	resp, err := http.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return ImageInfo{}, fmt.Errorf("error while getting %s: %s", url, err)
+		return info, fmt.Errorf("error while creating request: %s", err)
+	}
+
+	// 将提供的headers添加到请求中
+	req.Header = headers
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return info, fmt.Errorf("error while getting %s: %s", url, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ImageInfo{}, fmt.Errorf("error while reading body: %s", err)
+		return info, fmt.Errorf("error while reading body: %s", err)
 	}
 
-	var info ImageInfo
 	err = json.Unmarshal(body, &info)
 	if err != nil {
-		return ImageInfo{}, fmt.Errorf("server error while unmarshalling body: %s", err)
+		return info, fmt.Errorf("server error while unmarshalling body: %s", err)
 	}
 
 	if info.MultiplePlatformImageInfoList == nil {
-		return ImageInfo{}, fmt.Errorf("error %s", string(body))
+		return info, fmt.Errorf("error %s", string(body))
 	} else if len(info.MultiplePlatformImageInfoList) == 0 {
-		return ImageInfo{}, fmt.Errorf("images is empty for %s:%s", image, tag)
+		return info, fmt.Errorf("images is empty for %s:%s", image, tag)
 	}
+
+	cache[image+":"+tag] = info
 
 	return info, nil
 }
 
+// Use docker client API to fetch portainer list
 func GetDockerPortainerList() ([]Container, error) {
 	ctx := context.Background()
 
@@ -116,6 +154,14 @@ func GetDockerPortainerList() ([]Container, error) {
 }
 
 func main() {
+	// set up ghcr token from env
+	v := os.Getenv("GHCR_TOKEN")
+	if v != "" {
+		ghcr_token = &v
+	}
+	// init cache map
+	cache = make(CacheMap)
+
 	containers, err := GetDockerPortainerList()
 	if err != nil {
 		log.Fatal("Unable to get docker list:", err)
@@ -136,10 +182,10 @@ func main() {
 		}
 
 		if imageDigest == latest.Digest {
-			log.Println(name, imageName, "✅")
+			log.Println(name, imageName, imageTag, "✅")
 			continue
 		} else if imageTag == "latest" {
-			log.Println(name, imageName, "❌")
+			log.Println(name, imageName, imageTag, "❌")
 			continue
 		}
 
@@ -173,9 +219,9 @@ func main() {
 		}
 
 		if currentDigest != latestDigest {
-			log.Println(name, imageName, "❌")
+			log.Println(name, imageName, imageTag, "❌")
 		} else {
-			log.Println(name, imageName, "✅")
+			log.Println(name, imageName, imageTag, "✅")
 		}
 
 	}
