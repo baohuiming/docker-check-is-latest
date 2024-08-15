@@ -25,6 +25,7 @@ type MultiplePlatformImageInfo struct {
 type ImageInfo struct {
 	Digest                        string                      `json:"digest"`
 	MultiplePlatformImageInfoList []MultiplePlatformImageInfo `json:"images"`
+	Tags                          []string
 }
 
 type Container struct {
@@ -35,8 +36,13 @@ type Container struct {
 type CacheMap map[string]ImageInfo
 
 type GHCRVersion struct {
-	Digest string `json:"name"` // startwith "sha256:"
-	ApiUrl string `json:"url"`
+	Digest   string `json:"name"` // startwith "sha256:"
+	ApiUrl   string `json:"url"`
+	Metadata struct {
+		Container struct {
+			Tags []string `json:"tags"`
+		} `json:"container"`
+	} `json:"metadata"`
 }
 
 var ghcr_token *string
@@ -96,7 +102,7 @@ func GetRemoteDockerInfo(image, tag, digest string) (ImageInfo, error) {
 			params = fmt.Sprintf("?page=%d&per_page=100", page)
 		}
 
-		log.Println("url:", url+params)
+		// log.Println("url:", url+params)
 
 		req, err := http.NewRequest("GET", url+params, nil)
 		if err != nil {
@@ -138,32 +144,15 @@ func GetRemoteDockerInfo(image, tag, digest string) (ImageInfo, error) {
 			if err != nil {
 				return info, fmt.Errorf("server error while unmarshalling body: %s", err)
 			}
-			// log.Println(resVersions)
+
 			if len(resVersions) == 0 {
 				return info, fmt.Errorf("no matching images for %s:%s", image, tag)
 			}
 
 			for _, v := range resVersions {
 				if v.Digest == digest {
-					log.Println("v.Digest", v.Digest, digest, "✅")
-					// Get v.ApiUrl
-					req, err := http.NewRequest("GET", v.ApiUrl, nil)
-					if err != nil {
-						return info, fmt.Errorf("error while creating request: %s", err)
-					}
-
-					req.Header = headers
-					resp, err := client.Do(req)
-					if err != nil {
-						return info, fmt.Errorf("error while getting %s: %s", v.ApiUrl, err)
-					}
-					defer resp.Body.Close()
-					body, err = io.ReadAll(resp.Body)
-					if err != nil {
-						return info, fmt.Errorf("error while reading body: %s", err)
-					}
-					// todo
-					log.Println(string(body))
+					info.Digest = v.Digest
+					info.Tags = v.Metadata.Container.Tags
 					return info, nil
 				}
 			}
