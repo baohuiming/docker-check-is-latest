@@ -1,4 +1,5 @@
 // Check if each container in the local machine's container list has an image that matches the latest version from the remote repository.
+// Portainer's similar script ref: https://github.com/portainer/portainer/blob/054898f821544e16c58ec0595c8990e0d2d415bf/api/docker/images/status.go
 package main
 
 import (
@@ -163,7 +164,7 @@ func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, er
 			}
 
 			if len(resVersions) == 0 {
-				return ImageInfo{}, fmt.Errorf("no matching images for %s:%s", image, tag)
+				return ImageInfo{}, fmt.Errorf("no matching images for %s:%s %s %s", image, tag, url, string(body))
 			}
 
 			for _, v := range resVersions {
