@@ -49,7 +49,7 @@ var ghcr_token *string
 var cache CacheMap
 
 // Use registry APIs to fetch image info
-func GetRemoteDockerInfo(image, tag, digest string) (ImageInfo, error) {
+func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, error) {
 	// [registry-hostname]/[namespace]/[image-name]:[tag]
 	var url string
 	var info ImageInfo
@@ -93,7 +93,7 @@ func GetRemoteDockerInfo(image, tag, digest string) (ImageInfo, error) {
 		// url = "https://quay.io/api/v1/repository/{namespace}/{package}/tag/"
 		fallthrough
 	default:
-		return info, fmt.Errorf("not support image %s", image)
+		return ImageInfo{}, fmt.Errorf("not support image %s", image)
 	}
 
 	for page := 1; ; page++ {
@@ -106,7 +106,7 @@ func GetRemoteDockerInfo(image, tag, digest string) (ImageInfo, error) {
 
 		req, err := http.NewRequest("GET", url+params, nil)
 		if err != nil {
-			return info, fmt.Errorf("error while creating request: %s", err)
+			return ImageInfo{}, fmt.Errorf("error while creating request: %s", err)
 		}
 
 		req.Header = headers
@@ -114,27 +114,26 @@ func GetRemoteDockerInfo(image, tag, digest string) (ImageInfo, error) {
 		client := &http.Client{}
 		resp, err := client.Do(req)
 		if err != nil {
-			return info, fmt.Errorf("error while getting %s: %s", url, err)
+			return ImageInfo{}, fmt.Errorf("error while getting %s: %s", url, err)
 		}
 		defer resp.Body.Close()
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return info, fmt.Errorf("error while reading body: %s", err)
+			return ImageInfo{}, fmt.Errorf("error while reading body: %s", err)
 		}
 
 		if registry == "docker.io" {
 			err = json.Unmarshal(body, &info)
 			if err != nil {
-				return info, fmt.Errorf("server error while unmarshalling body: %s", err)
+				return ImageInfo{}, fmt.Errorf("server error while unmarshalling body: %s", err)
 			}
 
 			if info.MultiplePlatformImageInfoList == nil {
-				return info, fmt.Errorf("error %s", string(body))
+				return ImageInfo{}, fmt.Errorf("error %s", string(body))
 			} else if len(info.MultiplePlatformImageInfoList) == 0 {
-				return info, fmt.Errorf("images is empty for %s:%s", image, tag)
+				return ImageInfo{}, fmt.Errorf("error images is empty for %s:%s", image, tag)
 			}
-
 			cache[image+":"+tag] = info
 
 			return info, nil
@@ -142,24 +141,35 @@ func GetRemoteDockerInfo(image, tag, digest string) (ImageInfo, error) {
 			var resVersions []GHCRVersion
 			err = json.Unmarshal(body, &resVersions)
 			if err != nil {
-				return info, fmt.Errorf("server error while unmarshalling body: %s", err)
+				return ImageInfo{}, fmt.Errorf("server error while unmarshalling body: %s", err)
 			}
 
 			if len(resVersions) == 0 {
-				return info, fmt.Errorf("no matching images for %s:%s", image, tag)
+				return ImageInfo{}, fmt.Errorf("no matching images for %s:%s", image, tag)
 			}
 
 			for _, v := range resVersions {
-				if v.Digest == digest {
+				if digest != "" && v.Digest == digest {
 					info.Digest = v.Digest
 					info.Tags = v.Metadata.Container.Tags
+					cache[image+":"+tag] = info
+
 					return info, nil
+				} else if digest == "" {
+					for _, t := range v.Metadata.Container.Tags {
+						if t == tag {
+							info.Digest = v.Digest
+							info.Tags = v.Metadata.Container.Tags
+							cache[image+":"+tag] = info
+
+							return info, nil
+						}
+					}
+					return ImageInfo{}, nil
 				}
 			}
-
 		}
 	}
-
 }
 
 // Use docker client API to fetch portainer list
@@ -208,27 +218,38 @@ func main() {
 	if err != nil {
 		log.Fatal("Unable to get docker list:", err)
 	}
+
 	for _, container := range containers {
 		name := container.Names[0]
 		imageName := container.Image
+		registry := "docker.io"
+		if imagePart := strings.Split(imageName, "/"); len(imagePart) > 2 {
+			registry = imagePart[len(imagePart)-3]
+		}
 		imageDigest := strings.Split(container.ImageInspect.RepoDigests[0], "@")[1] // startwith "sha256:"
-		var imageTag string = "latest"
+		imageTag := "latest"
 		if strings.Contains(imageName, ":") {
 			imageTag = strings.Split(imageName, ":")[1]
 			imageName = strings.Split(imageName, ":")[0]
 		}
-		latest, err := GetRemoteDockerInfo(imageName, "latest", imageDigest)
-		if err != nil {
-			log.Println("Unable to get remote docker tag:", name, imageName, err)
-			continue
-		}
 
-		if imageDigest == latest.Digest {
-			log.Println(name, imageName, imageTag, "✅")
-			continue
-		} else if imageTag == "latest" {
-			log.Println(name, imageName, imageTag, "❌")
-			continue
+		var latest ImageInfo
+		var current ImageInfo
+
+		if registry == "docker.io" {
+			latest, err = GetRemoteDockerInfo(imageName, "latest", "")
+			if err != nil {
+				log.Println("Unable to get remote docker tag:", name, imageName, err)
+				continue
+			}
+
+			if imageDigest == latest.Digest {
+				log.Println(name, imageName, imageTag, "✅")
+				continue
+			} else if imageTag == "latest" {
+				log.Println(name, imageName, imageTag, "❌")
+				continue
+			}
 		}
 
 		current, err := GetRemoteDockerInfo(imageName, imageTag, imageDigest)
@@ -237,35 +258,51 @@ func main() {
 			log.Println("Unable to get remote docker tag:", err)
 		}
 
-		var currentDigest string
-		var latestDigest string
-
-		for _, img := range current.MultiplePlatformImageInfoList {
-			if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
-				currentDigest = img.Digest
+		if registry == "ghcr.io" {
+			isLatest := false
+			for _, t := range current.Tags {
+				if t == "latest" {
+					isLatest = true
+					break
+				}
 			}
-		}
-		if currentDigest == "" {
-			log.Println("Unable to find current digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
+			if isLatest {
+				log.Println(name, imageName, imageTag, "✅")
+			} else {
+				log.Println(name, imageName, imageTag, "❌")
+			}
 			continue
 		}
 
-		for _, img := range latest.MultiplePlatformImageInfoList {
-			if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
-				latestDigest = img.Digest
+		if registry == "docker.io" {
+			var currentDigest string
+			var latestDigest string
+
+			for _, img := range current.MultiplePlatformImageInfoList {
+				if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
+					currentDigest = img.Digest
+				}
+			}
+			if currentDigest == "" {
+				log.Println("Unable to find current digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
+				continue
+			}
+
+			for _, img := range latest.MultiplePlatformImageInfoList {
+				if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
+					latestDigest = img.Digest
+				}
+			}
+			if latestDigest == "" {
+				log.Println("Unable to find latest digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
+				continue
+			}
+
+			if currentDigest != latestDigest {
+				log.Println(name, imageName, imageTag, "❌")
+			} else {
+				log.Println(name, imageName, imageTag, "✅")
 			}
 		}
-		if latestDigest == "" {
-			log.Println("Unable to find latest digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
-			continue
-		}
-
-		if currentDigest != latestDigest {
-			log.Println(name, imageName, imageTag, "❌")
-		} else {
-			log.Println(name, imageName, imageTag, "✅")
-		}
-
 	}
-
 }
