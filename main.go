@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -46,9 +47,9 @@ type GHCRVersion struct {
 }
 
 type CheckResult struct {
-	container string
-	image     string
-	isLatest  string
+	Container string `json:"container"`
+	Image     string `json:"image"`
+	IsLatest  string `json:"is_latest"`
 }
 
 var (
@@ -91,11 +92,11 @@ func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, er
 	headers := make(http.Header)
 
 	switch registry {
-	// https://github.com/rancher/image-mirror/blob/2528359b6681c2bbaaa1a2cd1c2db9005e8cbff1/retrieve-image-tags/retrieve-image-tags.py#L36
+	// ref: https://github.com/rancher/image-mirror/blob/2528359b6681c2bbaaa1a2cd1c2db9005e8cbff1/retrieve-image-tags/retrieve-image-tags.py#L36
 	case "docker.io":
 		url = fmt.Sprintf("https://registry.hub.docker.com/v2/repositories/%s/%s/tags/%s", namespace, name, tag)
 	case "ghcr.io":
-		// https://docs.github.com/zh/rest/packages/packages?apiVersion=2022-11-28#list-package-versions-for-a-package-owned-by-an-organization
+		// doc: https://docs.github.com/zh/rest/packages/packages?apiVersion=2022-11-28#list-package-versions-for-a-package-owned-by-an-organization
 		if ghcr_token == "" {
 			return info, fmt.Errorf("missing ghcr_token")
 		}
@@ -330,5 +331,18 @@ func main() {
 		}
 
 		check(name, imageName+":"+imageTag, "unknown")
+	}
+
+	if outputPath != "" {
+		jsonData, err := json.MarshalIndent(checkResults, "", "  ")
+		if err != nil {
+			log.Fatal("Unable to marshal json:", err)
+			return
+		}
+
+		err = os.WriteFile(outputPath, jsonData, os.ModePerm)
+		if err != nil {
+			log.Fatal("Unable to write file:", err)
+		}
 	}
 }
