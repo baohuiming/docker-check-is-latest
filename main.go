@@ -4,11 +4,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -45,8 +45,25 @@ type GHCRVersion struct {
 	} `json:"metadata"`
 }
 
-var ghcr_token *string
-var cache CacheMap
+type CheckResult struct {
+	container string
+	image     string
+	isLatest  string
+}
+
+var (
+	ghcr_token   string
+	outputPath   string
+	cache        CacheMap
+	checkResults []CheckResult
+)
+
+func check(containerName string, imageName string, isLatest string) {
+	log.Printf("%10s %s %s", "["+isLatest+"]", containerName, imageName)
+	if outputPath != "" {
+		checkResults = append(checkResults, CheckResult{containerName, imageName, isLatest})
+	}
+}
 
 // Use registry APIs to fetch image info
 func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, error) {
@@ -79,12 +96,12 @@ func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, er
 		url = fmt.Sprintf("https://registry.hub.docker.com/v2/repositories/%s/%s/tags/%s", namespace, name, tag)
 	case "ghcr.io":
 		// https://docs.github.com/zh/rest/packages/packages?apiVersion=2022-11-28#list-package-versions-for-a-package-owned-by-an-organization
-		if ghcr_token == nil {
+		if ghcr_token == "" {
 			return info, fmt.Errorf("missing ghcr_token")
 		}
 		url = fmt.Sprintf("https://api.github.com/orgs/%s/packages/container/%s/versions", namespace, name)
 		headers.Set("Accept", "application/vnd.github+json")
-		headers.Set("Authorization", "Bearer "+*ghcr_token)
+		headers.Set("Authorization", "Bearer "+ghcr_token)
 		headers.Set("X-GitHub-Api-Version", "2022-11-28")
 	case "gcr.io":
 		// url = "https://gcr.io/v2/{namespace}/{package}/tags/list"
@@ -206,11 +223,11 @@ func GetDockerPortainerList() ([]Container, error) {
 }
 
 func main() {
-	// set up ghcr token from env
-	v := os.Getenv("GHCR_TOKEN")
-	if v != "" {
-		ghcr_token = &v
-	}
+	// set up ghcr token from flag
+	flag.StringVar(&ghcr_token, "ghcr_token", "", "GitHub Container Registry token")
+	flag.StringVar(&outputPath, "output", "", "Output file path")
+	flag.Parse()
+
 	// init cache map
 	cache = make(CacheMap)
 
@@ -240,14 +257,15 @@ func main() {
 			latest, err = GetRemoteDockerInfo(imageName, "latest", "")
 			if err != nil {
 				log.Println("Unable to get remote docker tag:", name, imageName, err)
+				check(name, imageName+":"+imageTag, "unknown")
 				continue
 			}
 
 			if imageDigest == latest.Digest {
-				log.Println(name, imageName, imageTag, "✅")
+				check(name, imageName+":"+imageTag, "yes")
 				continue
 			} else if imageTag == "latest" {
-				log.Println(name, imageName, imageTag, "❌")
+				check(name, imageName+":"+imageTag, "no")
 				continue
 			}
 		}
@@ -256,6 +274,8 @@ func main() {
 
 		if err != nil {
 			log.Println("Unable to get remote docker tag:", err)
+			check(name, imageName+":"+imageTag, "unknown")
+			continue
 		}
 
 		if registry == "ghcr.io" {
@@ -267,9 +287,9 @@ func main() {
 				}
 			}
 			if isLatest {
-				log.Println(name, imageName, imageTag, "✅")
+				check(name, imageName+":"+imageTag, "yes")
 			} else {
-				log.Println(name, imageName, imageTag, "❌")
+				check(name, imageName+":"+imageTag, "no")
 			}
 			continue
 		}
@@ -285,6 +305,7 @@ func main() {
 			}
 			if currentDigest == "" {
 				log.Println("Unable to find current digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
+				check(name, imageName+":"+imageTag, "unknown")
 				continue
 			}
 
@@ -295,14 +316,19 @@ func main() {
 			}
 			if latestDigest == "" {
 				log.Println("Unable to find latest digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
+				check(name, imageName+":"+imageTag, "unknown")
 				continue
 			}
 
 			if currentDigest != latestDigest {
-				log.Println(name, imageName, imageTag, "❌")
+				check(name, imageName+":"+imageTag, "no")
+				continue
 			} else {
-				log.Println(name, imageName, imageTag, "✅")
+				check(name, imageName+":"+imageTag, "yes")
+				continue
 			}
 		}
+
+		check(name, imageName+":"+imageTag, "unknown")
 	}
 }
