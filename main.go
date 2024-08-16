@@ -164,7 +164,7 @@ func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, er
 			}
 
 			if len(resVersions) == 0 {
-				return ImageInfo{}, fmt.Errorf("no matching images for %s:%s %s %s", image, tag, url, string(body))
+				return ImageInfo{}, fmt.Errorf("no matching images for %s:%s %s %s", image, tag, url+params, string(body))
 			}
 
 			for _, v := range resVersions {
