@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -68,7 +69,7 @@ func check(containerName string, imageName string, isLatest string) {
 }
 
 // Use registry APIs to fetch image info
-func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, error) {
+func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo, error) {
 	// [registry-hostname]/[namespace]/[image-name]:[tag]
 	var url string
 	var info ImageInfo
@@ -168,13 +169,13 @@ func GetRemoteDockerInfo(image string, tag string, digest string) (ImageInfo, er
 			}
 
 			for _, v := range resVersions {
-				if digest != "" && v.Digest == digest {
+				if digests != nil && slices.Contains(digests, image+"@"+v.Digest) {
 					info.Digest = v.Digest
 					info.Tags = v.Metadata.Container.Tags
 					cache[image+":"+tag] = info
 
 					return info, nil
-				} else if digest == "" {
+				} else if digests == nil {
 					for _, t := range v.Metadata.Container.Tags {
 						if t == tag {
 							info.Digest = v.Digest
@@ -245,7 +246,6 @@ func main() {
 		if imagePart := strings.Split(imageName, "/"); len(imagePart) > 2 {
 			registry = imagePart[len(imagePart)-3]
 		}
-		imageDigest := strings.Split(container.ImageInspect.RepoDigests[0], "@")[1] // startwith "sha256:"
 		imageTag := "latest"
 		if strings.Contains(imageName, ":") {
 			imageTag = strings.Split(imageName, ":")[1]
@@ -256,14 +256,14 @@ func main() {
 		var current ImageInfo
 
 		if registry == "docker.io" {
-			latest, err = GetRemoteDockerInfo(imageName, "latest", "")
+			latest, err = GetRemoteDockerInfo(imageName, "latest", nil)
 			if err != nil {
 				log.Println("Unable to get remote docker tag:", name, imageName, err)
 				check(name, imageName+":"+imageTag, "unknown")
 				continue
 			}
 
-			if imageDigest == latest.Digest {
+			if slices.Contains[[]string, string](container.ImageInspect.RepoDigests, imageName+"@"+latest.Digest) {
 				check(name, imageName+":"+imageTag, "yes")
 				continue
 			} else if imageTag == "latest" {
@@ -272,7 +272,7 @@ func main() {
 			}
 		}
 
-		current, err := GetRemoteDockerInfo(imageName, imageTag, imageDigest)
+		current, err := GetRemoteDockerInfo(imageName, imageTag, container.ImageInspect.RepoDigests)
 
 		if err != nil {
 			log.Println("Unable to get remote docker tag:", err)
