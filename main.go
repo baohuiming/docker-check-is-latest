@@ -3,20 +3,18 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 )
 
 type MultiplePlatformImageInfo struct {
@@ -40,7 +38,6 @@ type CacheMap map[string]ImageInfo
 
 type GHCRVersion struct {
 	Digest   string `json:"name"` // startwith "sha256:"
-	ApiUrl   string `json:"url"`
 	Metadata struct {
 		Container struct {
 			Tags []string `json:"tags"`
@@ -49,9 +46,10 @@ type GHCRVersion struct {
 }
 
 type CheckResult struct {
-	Container string `json:"container"`
-	Image     string `json:"image"`
-	IsLatest  string `json:"is_latest"`
+	Container  string `json:"container"`
+	Image      string `json:"image"`
+	IsLatest   string `json:"is_latest"`
+	LatestTags string `json:"latest_tags"`
 }
 
 var (
@@ -59,12 +57,14 @@ var (
 	outputPath   string
 	cache        CacheMap
 	checkResults []CheckResult
+	proxy        string
+	transport    *http.Transport = &http.Transport{}
 )
 
-func check(containerName string, imageName string, isLatest string) {
-	log.Printf("%10s %s %s", "["+isLatest+"]", containerName, imageName)
+func check(containerName, imageName, isLatest, latestTags string) {
+	log.Printf("%10s %s %s {%s}", "["+isLatest+"]", containerName, imageName, latestTags)
 	if outputPath != "" {
-		checkResults = append(checkResults, CheckResult{containerName, imageName, isLatest})
+		checkResults = append(checkResults, CheckResult{containerName, imageName, isLatest, latestTags})
 	}
 }
 
@@ -74,6 +74,7 @@ func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo,
 	var url string
 	var info ImageInfo
 	if v, ok := cache[image+":"+tag]; ok {
+		// log.Println("✅命中缓存", image+":"+tag, digests)
 		return v, nil
 	}
 
@@ -131,7 +132,9 @@ func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo,
 
 		req.Header = headers
 
-		client := &http.Client{}
+		client := &http.Client{
+			Transport: transport,
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			return ImageInfo{}, fmt.Errorf("error while getting %s: %s", url, err)
@@ -192,44 +195,20 @@ func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo,
 	}
 }
 
-// Use docker client API to fetch portainer list
-func GetDockerPortainerList() ([]Container, error) {
-	ctx := context.Background()
-
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return nil, fmt.Errorf("error while creating docker client: %s", err)
-	}
-
-	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
-
-	if err != nil {
-		return nil, fmt.Errorf("error while listing containers: %s", err)
-	}
-
-	containerWithImageInfos := make([]Container, 0, len(containers))
-	for _, c := range containers {
-		img, _, err := cli.ImageInspectWithRaw(ctx, c.Image)
-		if err != nil {
-			return nil, fmt.Errorf("error while inspecting image %s of container %s: %s", c.Image, c.ID, err)
-		}
-
-		containerWithImageInfo := Container{
-			Container:    c,
-			ImageInspect: img,
-		}
-
-		containerWithImageInfos = append(containerWithImageInfos, containerWithImageInfo)
-	}
-	return containerWithImageInfos, nil
-
-}
-
 func main() {
 	// set up ghcr token from flag
 	flag.StringVar(&ghcr_token, "ghcr_token", "", "GitHub Container Registry token")
 	flag.StringVar(&outputPath, "output", "", "Output file path")
+	flag.StringVar(&proxy, "proxy", "", "Proxy URL")
 	flag.Parse()
+
+	if proxy != "" {
+		proxyURL, err := url.Parse(proxy)
+		if err != nil {
+			log.Fatal("Unable to parse proxy URL:", err)
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
 
 	// init cache map
 	cache = make(CacheMap)
@@ -259,15 +238,15 @@ func main() {
 			latest, err = GetRemoteDockerInfo(imageName, "latest", nil)
 			if err != nil {
 				log.Println("Unable to get remote docker tag:", name, imageName, err)
-				check(name, imageName+":"+imageTag, "unknown")
+				check(name, imageName+":"+imageTag, "unknown", "")
 				continue
 			}
 
-			if slices.Contains[[]string, string](container.ImageInspect.RepoDigests, imageName+"@"+latest.Digest) {
-				check(name, imageName+":"+imageTag, "yes")
+			if slices.Contains(container.ImageInspect.RepoDigests, imageName+"@"+latest.Digest) {
+				check(name, imageName+":"+imageTag, "yes", "")
 				continue
 			} else if imageTag == "latest" {
-				check(name, imageName+":"+imageTag, "no")
+				check(name, imageName+":"+imageTag, "no", "")
 				continue
 			}
 		}
@@ -276,22 +255,15 @@ func main() {
 
 		if err != nil {
 			log.Println("Unable to get remote docker tag:", err)
-			check(name, imageName+":"+imageTag, "unknown")
+			check(name, imageName+":"+imageTag, "unknown", "")
 			continue
 		}
 
 		if registry == "ghcr.io" {
-			isLatest := false
-			for _, t := range current.Tags {
-				if t == "latest" {
-					isLatest = true
-					break
-				}
-			}
-			if isLatest {
-				check(name, imageName+":"+imageTag, "yes")
+			if slices.Contains(current.Tags, "latest") {
+				check(name, imageName+":"+imageTag, "yes", strings.Join(current.Tags, "|"))
 			} else {
-				check(name, imageName+":"+imageTag, "no")
+				check(name, imageName+":"+imageTag, "no", "")
 			}
 			continue
 		}
@@ -307,7 +279,7 @@ func main() {
 			}
 			if currentDigest == "" {
 				log.Println("Unable to find current digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
-				check(name, imageName+":"+imageTag, "unknown")
+				check(name, imageName+":"+imageTag, "unknown", "")
 				continue
 			}
 
@@ -318,20 +290,20 @@ func main() {
 			}
 			if latestDigest == "" {
 				log.Println("Unable to find latest digest for", container.ImageInspect.Os, container.ImageInspect.Architecture)
-				check(name, imageName+":"+imageTag, "unknown")
+				check(name, imageName+":"+imageTag, "unknown", "")
 				continue
 			}
 
 			if currentDigest != latestDigest {
-				check(name, imageName+":"+imageTag, "no")
+				check(name, imageName+":"+imageTag, "no", "")
 				continue
 			} else {
-				check(name, imageName+":"+imageTag, "yes")
+				check(name, imageName+":"+imageTag, "yes", "")
 				continue
 			}
 		}
 
-		check(name, imageName+":"+imageTag, "unknown")
+		check(name, imageName+":"+imageTag, "unknown", "")
 	}
 
 	if outputPath != "" {
