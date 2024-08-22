@@ -25,8 +25,8 @@ type MultiplePlatformImageInfo struct {
 
 type ImageInfo struct {
 	Digest                        string                      `json:"digest"`
-	MultiplePlatformImageInfoList []MultiplePlatformImageInfo `json:"images"`
-	Tags                          []string
+	MultiplePlatformImageInfoList []MultiplePlatformImageInfo `json:"images"` // for docker.io
+	Tags                          []string                    // for ghcr.io
 }
 
 type Container struct {
@@ -34,7 +34,10 @@ type Container struct {
 	ImageInspect types.ImageInspect
 }
 
-type CacheMap map[string]ImageInfo
+type Cache struct {
+	ImageInfoCache map[string]ImageInfo
+	HTTPCache      map[string][]byte
+}
 
 type GHCRVersion struct {
 	Digest   string `json:"name"` // startwith "sha256:"
@@ -55,7 +58,7 @@ type CheckResult struct {
 var (
 	ghcr_token   string
 	outputPath   string
-	cache        CacheMap
+	cache        Cache
 	checkResults []CheckResult
 	proxy        string
 	transport    *http.Transport = &http.Transport{}
@@ -73,8 +76,7 @@ func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo,
 	// [registry-hostname]/[namespace]/[image-name]:[tag]
 	var url string
 	var info ImageInfo
-	if v, ok := cache[image+":"+tag]; ok {
-		// log.Println("✅命中缓存", image+":"+tag, digests)
+	if v, ok := cache.ImageInfoCache[image+":"+tag+strings.Join(digests, ",")]; ok {
 		return v, nil
 	}
 
@@ -123,31 +125,37 @@ func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo,
 			params = fmt.Sprintf("?page=%d&per_page=100", page)
 		}
 
-		// log.Println("url:", url+params)
+		var body []byte
 
-		req, err := http.NewRequest("GET", url+params, nil)
-		if err != nil {
-			return ImageInfo{}, fmt.Errorf("error while creating request: %s", err)
-		}
+		if b, ok := cache.HTTPCache[url+params]; ok {
+			body = b
+		} else {
+			req, err := http.NewRequest("GET", url+params, nil)
+			if err != nil {
+				return ImageInfo{}, fmt.Errorf("error while creating request: %s", err)
+			}
 
-		req.Header = headers
+			req.Header = headers
 
-		client := &http.Client{
-			Transport: transport,
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return ImageInfo{}, fmt.Errorf("error while getting %s: %s", url, err)
-		}
-		defer resp.Body.Close()
+			client := &http.Client{
+				Transport: transport,
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return ImageInfo{}, fmt.Errorf("error while getting %s: %s", url, err)
+			}
+			defer resp.Body.Close()
 
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return ImageInfo{}, fmt.Errorf("error while reading body: %s", err)
+			body, err = io.ReadAll(resp.Body)
+			if err != nil {
+				return ImageInfo{}, fmt.Errorf("error while reading body: %s", err)
+			}
+
+			cache.HTTPCache[url+params] = body
 		}
 
 		if registry == "docker.io" {
-			err = json.Unmarshal(body, &info)
+			err := json.Unmarshal(body, &info)
 			if err != nil {
 				return ImageInfo{}, fmt.Errorf("server error while unmarshalling body: %s", err)
 			}
@@ -157,12 +165,12 @@ func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo,
 			} else if len(info.MultiplePlatformImageInfoList) == 0 {
 				return ImageInfo{}, fmt.Errorf("error images is empty for %s:%s", image, tag)
 			}
-			cache[image+":"+tag] = info
+			cache.ImageInfoCache[image+":"+tag] = info
 
 			return info, nil
 		} else if registry == "ghcr.io" {
 			var resVersions []GHCRVersion
-			err = json.Unmarshal(body, &resVersions)
+			err := json.Unmarshal(body, &resVersions)
 			if err != nil {
 				return ImageInfo{}, fmt.Errorf("server error while unmarshalling body: %s", err)
 			}
@@ -172,25 +180,17 @@ func GetRemoteDockerInfo(image string, tag string, digests []string) (ImageInfo,
 			}
 
 			for _, v := range resVersions {
-				if digests != nil && slices.Contains(digests, image+"@"+v.Digest) {
+				if (digests != nil && slices.Contains(digests, image+"@"+v.Digest)) ||
+					(digests == nil && slices.Contains(v.Metadata.Container.Tags, tag)) {
 					info.Digest = v.Digest
 					info.Tags = v.Metadata.Container.Tags
-					cache[image+":"+tag] = info
+					cache.ImageInfoCache[image+":"+tag] = info
 
 					return info, nil
-				} else if digests == nil {
-					for _, t := range v.Metadata.Container.Tags {
-						if t == tag {
-							info.Digest = v.Digest
-							info.Tags = v.Metadata.Container.Tags
-							cache[image+":"+tag] = info
-
-							return info, nil
-						}
-					}
-					return ImageInfo{}, nil
 				}
 			}
+
+			return ImageInfo{}, nil
 		}
 	}
 }
@@ -210,8 +210,11 @@ func main() {
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
-	// init cache map
-	cache = make(CacheMap)
+	// init cache
+	cache = Cache{
+		ImageInfoCache: make(map[string]ImageInfo),
+		HTTPCache:      make(map[string][]byte),
+	}
 
 	containers, err := GetDockerPortainerList()
 	if err != nil {
@@ -234,21 +237,19 @@ func main() {
 		var latest ImageInfo
 		var current ImageInfo
 
-		if registry == "docker.io" {
-			latest, err = GetRemoteDockerInfo(imageName, "latest", nil)
-			if err != nil {
-				log.Println("Unable to get remote docker tag:", name, imageName, err)
-				check(name, imageName+":"+imageTag, "unknown", "")
-				continue
-			}
+		latest, err = GetRemoteDockerInfo(imageName, "latest", nil)
+		if err != nil {
+			log.Println("Unable to get remote docker tag:", name, imageName, err)
+			check(name, imageName+":"+imageTag, "unknown", "")
+			continue
+		}
 
-			if slices.Contains(container.ImageInspect.RepoDigests, imageName+"@"+latest.Digest) {
-				check(name, imageName+":"+imageTag, "yes", "")
-				continue
-			} else if imageTag == "latest" {
-				check(name, imageName+":"+imageTag, "no", "")
-				continue
-			}
+		if slices.Contains(container.ImageInspect.RepoDigests, imageName+"@"+latest.Digest) {
+			check(name, imageName+":"+imageTag, "yes", strings.Join(latest.Tags, "|"))
+			continue
+		} else if registry == "docker.io" && imageTag == "latest" {
+			check(name, imageName+":"+imageTag, "no", "")
+			continue
 		}
 
 		current, err := GetRemoteDockerInfo(imageName, imageTag, container.ImageInspect.RepoDigests)
@@ -261,9 +262,9 @@ func main() {
 
 		if registry == "ghcr.io" {
 			if slices.Contains(current.Tags, "latest") {
-				check(name, imageName+":"+imageTag, "yes", strings.Join(current.Tags, "|"))
+				check(name, imageName+":"+imageTag, "yes", strings.Join(latest.Tags, "|"))
 			} else {
-				check(name, imageName+":"+imageTag, "no", "")
+				check(name, imageName+":"+imageTag, "no", strings.Join(latest.Tags, "|"))
 			}
 			continue
 		}
