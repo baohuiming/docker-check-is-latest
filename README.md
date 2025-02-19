@@ -35,54 +35,10 @@ If the `--output` argument is provided, the results will be saved to a JSON file
 ```json
 [
   {
-    "container": "/thirsty_darwin",
-    "image": "ghcr.io/esphome/esphome:2024.6",
-    "is_latest": "no"
-  },
-  {
-    "container": "/peaceful_jemison",
-    "image": "eclipse-mosquitto:2.0.17",
-    "is_latest": "no"
-  },
-  {
-    "container": "/practical_bardeen",
-    "image": "eclipse-mosquitto:2.0.18",
-    "is_latest": "yes"
-  },
-  {
-    "container": "/friendly_gagarin",
-    "image": "ghcr.io/esphome/esphome:2024.7.3",
-    "is_latest": "yes"
-  },
-  {
-    "container": "/cool_robinson",
-    "image": "m.daocloud.io/docker.io/nodered/node-red:latest",
-    "is_latest": "yes"
-  },
-  {
-    "container": "/friendly_engelbart",
-    "image": "louislam/dockge:1",
-    "is_latest": "yes"
-  },
-  {
-    "container": "/busy_thompson",
-    "image": "postgres:16.2",
-    "is_latest": "no"
-  },
-  {
-    "container": "/sleepy_heisenberg",
-    "image": "postgres:16.2",
-    "is_latest": "no"
-  },
-  {
-    "container": "/agitated_engelbart",
-    "image": "postgres:16.2",
-    "is_latest": "no"
-  },
-  {
-    "container": "/magical_hawking",
-    "image": "postgres:16.2",
-    "is_latest": "no"
+    "container": "/great_heisenberg",
+    "image": "m.daocloud.io/ghcr.io/esphome/esphome:2024.12.4",
+    "is_latest": "yes",
+    "latest_tags": "2024.12.4|2024.12|stable|latest"
   }
 ]
 ```
