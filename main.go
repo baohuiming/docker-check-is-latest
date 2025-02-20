@@ -70,24 +70,26 @@ func main() {
 		}
 
 		var latestInfo ImageInfo
-		var currentInfo ImageInfo
+		var localInfo ImageInfo
 
-		latestInfo, err = GetRemoteImageInfo(imageName, "latest", nil)
+		latestInfo, err = GetRemoteImageInfo(imageName, "latest", nil, true)
 		if err != nil { // unable to get latest info, 404 or other error
 			log.Println("Unable to get remote docker tag:", name, imageName, err)
 			check(name, imageName+":"+imageTag, "unknown", "")
 			continue
 		}
 
+		latestTagStrs := strings.Join(latestInfo.Tags, "|")
+
 		if slices.Contains(container.ImageInspect.RepoDigests, imageName+"@"+latestInfo.Digest) {
-			check(name, imageName+":"+imageTag, "yes", strings.Join(latestInfo.Tags, "|"))
+			check(name, imageName+":"+imageTag, "yes", latestTagStrs)
 			continue
 		} else if registry == "docker.io" && imageTag == "latest" {
-			check(name, imageName+":"+imageTag, "no", "")
+			check(name, imageName+":"+imageTag, "no", latestTagStrs)
 			continue
 		}
 
-		currentInfo, err := GetRemoteImageInfo(imageName, imageTag, container.ImageInspect.RepoDigests)
+		localInfo, err := GetRemoteImageInfo(imageName, imageTag, container.ImageInspect.RepoDigests, false)
 
 		if err != nil {
 			log.Println("Unable to get remote docker tag:", err)
@@ -96,10 +98,10 @@ func main() {
 		}
 
 		if registry == "ghcr.io" {
-			if slices.Contains(currentInfo.Tags, "latest") {
-				check(name, imageName+":"+imageTag, "yes", strings.Join(latestInfo.Tags, "|"))
+			if slices.Contains(localInfo.Tags, "latest") {
+				check(name, imageName+":"+imageTag, "yes", latestTagStrs)
 			} else {
-				check(name, imageName+":"+imageTag, "no", strings.Join(latestInfo.Tags, "|"))
+				check(name, imageName+":"+imageTag, "no", latestTagStrs)
 			}
 			continue
 		}
@@ -108,8 +110,8 @@ func main() {
 			var currentDigest string
 			var latestDigest string
 
-			for _, img := range currentInfo.MultiplePlatformImageInfoList {
-				if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
+			for _, img := range localInfo.MultiplePlatformImageInfoList {
+				if img.Os == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
 					currentDigest = img.Digest
 				}
 			}
@@ -120,7 +122,7 @@ func main() {
 			}
 
 			for _, img := range latestInfo.MultiplePlatformImageInfoList {
-				if img.OS == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
+				if img.Os == container.ImageInspect.Os && img.Architecture == container.ImageInspect.Architecture {
 					latestDigest = img.Digest
 				}
 			}
@@ -131,15 +133,15 @@ func main() {
 			}
 
 			if currentDigest != latestDigest {
-				check(name, imageName+":"+imageTag, "no", "")
+				check(name, imageName+":"+imageTag, "no", latestTagStrs)
 				continue
 			} else {
-				check(name, imageName+":"+imageTag, "yes", "")
+				check(name, imageName+":"+imageTag, "yes", latestTagStrs)
 				continue
 			}
 		}
 
-		check(name, imageName+":"+imageTag, "unknown", "")
+		check(name, imageName+":"+imageTag, "unknown", latestTagStrs)
 	}
 
 	// write output to file
