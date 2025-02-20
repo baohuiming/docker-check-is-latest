@@ -67,9 +67,10 @@ func parseImageName(image string) (registry string, namespace string, name strin
 
 func sendRequest(url string, headers map[string]string) (body []byte, err error) {
 	if b, ok := cache.HTTPCache[url]; ok {
-		log.Println("cache hit", url)
+		log.Printf("GET %s [CACHE]", url)
 		return b, nil
 	} else {
+		log.Printf("GET %s", url)
 		header := make(http.Header)
 		for k, v := range headers {
 			header.Set(k, v)
@@ -108,17 +109,15 @@ func getDockerHubImageAllTags(image string, digest string) (tags []string, err e
 	for page := 1; ; page++ {
 		params := fmt.Sprintf("?page=%d&page_size=100", page)
 
-		log.Println("GET", url+params)
-
 		body, err := sendRequest(url+params, headers)
 		if err != nil {
-			return nil, err
+			return tags, err
 		}
 
 		var respTags DockerHubTagsResp
 		err = json.Unmarshal(body, &respTags)
-		if err != nil {
-			return nil, fmt.Errorf("server error while unmarshalling body: %s", err)
+		if err != nil { // page > total pages causes 404
+			return tags, fmt.Errorf("server error while unmarshalling body: %s", err)
 		}
 
 		if len(respTags.Results) == 0 {
@@ -133,7 +132,7 @@ func getDockerHubImageAllTags(image string, digest string) (tags []string, err e
 			}
 		}
 
-		if !pageContains {
+		if len(tags) != 0 && !pageContains {
 			return tags, nil
 		}
 	}
@@ -144,7 +143,6 @@ func getDockerHubImageAllTags(image string, digest string) (tags []string, err e
 func GetRemoteImageInfo(image string, tag string, digests []string, allTag bool) (ImageInfo, error) {
 	var url string
 	var info ImageInfo
-	allTag = true
 	if v, ok := cache.ImageInfoCache[image+":"+tag+strings.Join(digests, ",")]; ok {
 		return v, nil
 	}
@@ -179,7 +177,6 @@ func GetRemoteImageInfo(image string, tag string, digests []string, allTag bool)
 		if registry == "ghcr.io" {
 			params = fmt.Sprintf("?page=%d&per_page=100", page)
 		}
-		log.Println("GET", url+params)
 
 		body, err := sendRequest(url+params, headers)
 		if err != nil {
@@ -201,10 +198,10 @@ func GetRemoteImageInfo(image string, tag string, digests []string, allTag bool)
 				return ImageInfo{}, fmt.Errorf("error images is empty for %s:%s", image, tag)
 			}
 
-			if allTag {
+			if allTag && info.Digest != "" { // inactive image has no digest
 				tags, err := getDockerHubImageAllTags(image, info.Digest)
 				if err != nil {
-					return ImageInfo{}, err
+					log.Println("Unable to get all tags of", image, err)
 				}
 				info.Tags = tags
 			}
